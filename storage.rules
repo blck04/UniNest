@@ -1,0 +1,38 @@
+
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Property images: Allow landlords to write to their own property folders
+    // Allow public read for all property images
+    match /propertyImages/{landlordId}/{propertyId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null && request.auth.uid == landlordId
+                  && request.resource.size < 5 * 1024 * 1024 // Max 5MB
+                  && request.resource.contentType.matches('image/.*'); // Only images
+    }
+
+    // Student ID documents: Allow authenticated students to write to their own doc folders
+    match /userDocs/{studentId}/{docType}/{allPaths=**} {
+      allow read: if request.auth != null && request.auth.uid == studentId;
+      allow write: if request.auth != null && request.auth.uid == studentId
+                  && request.resource.size < 5 * 1024 * 1024 // Max 5MB
+                  && (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf')
+                  && (docType == 'nationalId' || docType == 'studentId');
+    }
+
+    // Profile Pictures
+    match /profilePictures/{userId}/{allPaths=**} {
+      allow read: if true; // Profile pictures are generally public
+      allow write: if request.auth != null && request.auth.uid == userId
+                  && request.resource.size < 2 * 1024 * 1024 // Max 2MB for profile pics
+                  && request.resource.contentType.matches('image/.*');
+    }
+
+    // Deny all other writes by default
+    match /{allPaths=**} {
+      allow read: if false; // Or be more specific if some public reads are needed
+      allow write: if false;
+    }
+  }
+}

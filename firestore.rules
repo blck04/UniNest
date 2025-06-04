@@ -1,0 +1,194 @@
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserDocument(userId) {
+      return get(/databases/$(database)/documents/users/$(userId));
+    }
+
+    function hasRole(role) {
+      let userDoc = getUserDocument(request.auth.uid);
+      return isAuthenticated() && userDoc.exists && userDoc.data.role == role;
+    }
+    
+    function isPropertyOwner(propertyId) {
+      let propertyDoc = getPropertyDocument(propertyId);
+      return propertyDoc.exists && propertyDoc.data.landlordId == request.auth.uid;
+    }
+
+    function getPropertyDocument(propertyId) {
+      return get(/databases/$(database)/documents/properties/$(propertyId));
+    }
+
+    // User Profiles
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || hasRole('landlord'));
+      allow create: if isAuthenticated() && request.auth.uid == userId
+                    && request.resource.data.uid == userId
+                    && request.resource.data.name is string && request.resource.data.name.size() > 0
+                    && request.resource.data.email == request.auth.token.email
+                    && request.resource.data.phoneNumber is string && request.resource.data.phoneNumber.size() >= 10
+                    && (request.resource.data.role == 'student' || request.resource.data.role == 'landlord')
+                    && (!request.resource.data.keys().hasAny(['nationalId', 'studentId', 'nextOfKinName', 'nextOfKinPhoneNumber', 'nationalIdPhotoUrl', 'studentIdPhotoUrl']) || request.resource.data.role == 'student')
+                    && (!request.resource.data.keys().has('savedPropertyIds') || request.resource.data.role == 'student')
+                    && request.resource.data.keys().hasOnly(['uid', 'name', 'email', 'phoneNumber', 'role', 'profilePictureUrl', 'nationalId', 'studentId', 'nextOfKinName', 'nextOfKinPhoneNumber', 'nationalIdPhotoUrl', 'studentIdPhotoUrl', 'savedPropertyIds']);
+
+      allow update: if isAuthenticated() && request.auth.uid == userId
+                    && request.resource.data.email == resource.data.email  // Email cannot be changed
+                    && request.resource.data.role == resource.data.role    // Role cannot be changed
+                    && request.resource.data.uid == resource.data.uid      // UID cannot be changed
+                    && (!request.resource.data.keys().hasAny(['nationalId', 'studentId', 'nextOfKinName', 'nextOfKinPhoneNumber', 'nationalIdPhotoUrl', 'studentIdPhotoUrl']) || resource.data.role == 'student') // Student fields only for students
+                    && (!request.resource.data.keys().has('savedPropertyIds') || resource.data.role == 'student') // savedPropertyIds only for students
+                    && (request.resource.data.name is string && request.resource.data.name.size() > 0)
+                    && (request.resource.data.phoneNumber is string && request.resource.data.phoneNumber.size() >= 10)
+                    && (!request.resource.data.containsKey('profilePictureUrl') || request.resource.data.profilePictureUrl is string)
+                    && (!request.resource.data.containsKey('nationalIdPhotoUrl') || request.resource.data.nationalIdPhotoUrl is string)
+                    && (!request.resource.data.containsKey('studentIdPhotoUrl') || request.resource.data.studentIdPhotoUrl is string)
+                    && request.resource.data.keys().hasOnly(['uid', 'name', 'email', 'phoneNumber', 'role', 'profilePictureUrl', 'nationalId', 'studentId', 'nextOfKinName', 'nextOfKinPhoneNumber', 'nationalIdPhotoUrl', 'studentIdPhotoUrl', 'savedPropertyIds']);
+      allow delete: if false; // Generally, users should not delete their own accounts via client
+    }
+
+    // Properties
+    match /properties/{propertyId} {
+      allow read: if true; // Publicly readable
+      
+      function isValidPropertyDataForCreate() {
+        return request.resource.data.name is string && request.resource.data.name.size() > 0
+            && request.resource.data.address is string && request.resource.data.address.size() > 0
+            && request.resource.data.city is string && request.resource.data.city.size() > 0
+            && request.resource.data.suburb is string && request.resource.data.suburb.size() > 0
+            && request.resource.data.description is string && request.resource.data.description.size() >= 20
+            && request.resource.data.type is string 
+            && request.resource.data.capacity is number && request.resource.data.capacity >= 1
+            && request.resource.data.genderPreference is string
+            && request.resource.data.amenities is list
+            && request.resource.data.price is number && request.resource.data.price > 0
+            && request.resource.data.availability is list
+            && request.resource.data.images is list && request.resource.data.images.size() > 0
+            && request.resource.data.landlordId == request.auth.uid
+            && request.resource.data.landlordName is string
+            && request.resource.data.landlordEmail is string
+            && request.resource.data.landlordPhoneNumber is string
+            && request.resource.data.viewCount == 0
+            && request.resource.data.interestedCount == 0
+            && request.resource.data.averageRating == 0
+            && request.resource.data.enrolledStudentsCount == 0
+            && request.resource.data.createdAt == request.time
+            && request.resource.data.updatedAt == request.time;
+      }
+
+      function isValidPropertyDataForUpdate() {
+        return request.resource.data.name is string && request.resource.data.name.size() > 0
+            && request.resource.data.address is string && request.resource.data.address.size() > 0
+            // ... other fields that can be updated by landlord
+            && request.resource.data.landlordId == resource.data.landlordId // Landlord ID cannot change
+            && request.resource.data.createdAt == resource.data.createdAt;   // CreatedAt cannot change
+      }
+
+      allow create: if hasRole('landlord') && isValidPropertyDataForCreate();
+      
+      allow update: if isAuthenticated() && request.resource.data.updatedAt == request.time && (
+                      // Case 1: Landlord updates their property
+                      (isPropertyOwner(propertyId) && isValidPropertyDataForUpdate()) ||
+                      // Case 2: Any authenticated user increments viewCount by 1
+                      (request.resource.data.viewCount == resource.data.viewCount + 1 &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewCount', 'updatedAt'])) ||
+                      // Case 3: Student updates averageRating (e.g., after a review)
+                      (hasRole('student') &&
+                       request.resource.data.averageRating is number && 
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['averageRating', 'updatedAt'])) ||
+                      // Case 4: Student increments interestedCount (e.g., after booking interest)
+                      (hasRole('student') && 
+                       request.resource.data.interestedCount == resource.data.interestedCount + 1 &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['interestedCount', 'updatedAt'])) ||
+                      // Case 5: Landlord updates enrolledStudentsCount (e.g., after enrollment/checkout)
+                      (isPropertyOwner(propertyId) && 
+                       request.resource.data.enrolledStudentsCount is number &&
+                       (request.resource.data.enrolledStudentsCount == resource.data.enrolledStudentsCount + 1 || request.resource.data.enrolledStudentsCount == resource.data.enrolledStudentsCount - 1) &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['enrolledStudentsCount', 'updatedAt']))
+                    );
+
+      allow delete: if hasRole('landlord') && isPropertyOwner(propertyId);
+    }
+
+    // Reviews
+    match /reviews/{reviewId} {
+      allow read: if true; // Publicly readable
+      allow create: if hasRole('student')
+                    && request.resource.data.studentId == request.auth.uid
+                    && request.resource.data.propertyId is string
+                    && request.resource.data.rating is number && request.resource.data.rating >= 1 && request.resource.data.rating <= 5
+                    && request.resource.data.comment is string && request.resource.data.comment.size() > 0
+                    && request.resource.data.studentName is string
+                    && request.resource.data.date == request.time;
+      allow update: if hasRole('student') && request.auth.uid == resource.data.studentId; // Student can update their own review
+      allow delete: if hasRole('student') && request.auth.uid == resource.data.studentId; // Student can delete their own review
+    }
+    
+    // Booking Interests
+    match /bookingInterests/{interestId} {
+      allow read: if isAuthenticated() && 
+                     (request.auth.uid == resource.data.studentId || 
+                      (hasRole('landlord') && getPropertyDocument(resource.data.propertyId).exists && getPropertyDocument(resource.data.propertyId).data.landlordId == request.auth.uid)
+                     );
+      allow create: if hasRole('student') 
+                    && request.auth.uid == request.resource.data.studentId
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.submittedAt == request.time
+                    && request.resource.data.propertyId is string
+                    && request.resource.data.propertyName is string
+                    && request.resource.data.studentName is string
+                    && request.resource.data.studentEmail is string
+                    && request.resource.data.nationalId is string
+                    && request.resource.data.studentAppId is string
+                    && request.resource.data.checkInDate is timestamp
+                    && request.resource.data.checkOutDate is timestamp
+                    && (!request.resource.data.containsKey('message') || request.resource.data.message is string)
+                    && (!request.resource.data.containsKey('nationalIdPhotoUrl') || request.resource.data.nationalIdPhotoUrl is string)
+                    && (!request.resource.data.containsKey('studentIdPhotoUrl') || request.resource.data.studentIdPhotoUrl is string);
+
+      allow update: if isAuthenticated() && request.resource.data.updatedAt == request.time && (
+                      (hasRole('landlord') && getPropertyDocument(resource.data.propertyId).exists && getPropertyDocument(resource.data.propertyId).data.landlordId == request.auth.uid && 
+                       request.resource.data.status in ['contacted', 'rejected', 'accepted', 'archived']) ||
+                      (request.auth.uid == resource.data.studentId && request.resource.data.status == 'archived' && resource.data.status != 'accepted') // Student can only archive their non-accepted interests
+                    ) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']);
+    }
+    
+    // Enrollments
+    match /enrollments/{enrollmentId} {
+       allow read: if isAuthenticated() && 
+                     (request.auth.uid == resource.data.studentId || 
+                      (hasRole('landlord') && resource.data.landlordId == request.auth.uid)
+                     );
+      allow create: if hasRole('landlord') 
+                    && request.auth.uid == request.resource.data.landlordId
+                    && request.resource.data.isActive == true
+                    && request.resource.data.propertyId is string
+                    && request.resource.data.propertyName is string
+                    && request.resource.data.studentId is string 
+                    && request.resource.data.studentName is string
+                    && request.resource.data.checkInDate is timestamp
+                    && request.resource.data.rentDueDate is timestamp
+                    && request.resource.data.checkOutDate is timestamp;
+                    
+      allow update: if isAuthenticated() && (
+                      // Landlord can update studentName, checkIn, rentDue, checkOut dates
+                      (hasRole('landlord') && request.auth.uid == resource.data.landlordId &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['studentName', 'checkInDate', 'rentDueDate', 'checkOutDate'])) ||
+                      // Student can deactivate (check-out)
+                      (request.auth.uid == resource.data.studentId && 
+                       resource.data.isActive == true && request.resource.data.isActive == false &&
+                       request.resource.data.actualCheckoutDate == request.time &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive', 'actualCheckoutDate']))
+                    );
+      allow delete: if hasRole('landlord') && request.auth.uid == resource.data.landlordId; // Landlord can remove enrollment record
+    }
+  }
+}
