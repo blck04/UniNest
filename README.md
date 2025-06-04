@@ -127,4 +127,3 @@ Contributions are welcome! If you have suggestions or find a bug, please feel fr
 
 ---
 
-This README provides a good starting point. You can expand it further as your project grows!
